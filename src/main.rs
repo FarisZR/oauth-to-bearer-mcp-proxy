@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use anyhow::{Result, bail};
-use oauth_to_key_mcp_proxy::{config::Config, router, serve};
+use oauth_to_bearer_mcp_proxy::{config::Config, router, serve};
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
@@ -14,12 +14,12 @@ async fn main() -> Result<()> {
         ),
         Some("--help" | "-h") => {
             println!(
-                "oauth-to-key-mcp-proxy [--config PATH]\n\nDefault configuration: config.toml\nOne OAuth facade for one bearer-authenticated HTTP MCP server."
+                "oauth-to-bearer-mcp-proxy [--config PATH]\n\nDefault configuration: config.toml\nOne OAuth facade for one bearer-authenticated HTTP MCP server."
             );
             return Ok(());
         }
         Some("--version" | "-V") => {
-            println!("oauth-to-key-mcp-proxy {}", env!("CARGO_PKG_VERSION"));
+            println!("oauth-to-bearer-mcp-proxy {}", env!("CARGO_PKG_VERSION"));
             return Ok(());
         }
         Some(_) => bail!("unknown argument; use --help"),
@@ -33,7 +33,7 @@ async fn main() -> Result<()> {
     let app = router(config)?;
     let listener = tokio::net::TcpListener::bind(bind).await?;
     eprintln!(
-        "oauth-to-key-mcp-proxy listening on {}",
+        "oauth-to-bearer-mcp-proxy listening on {}",
         listener.local_addr()?
     );
     serve(listener, app, limits, shutdown()).await?;

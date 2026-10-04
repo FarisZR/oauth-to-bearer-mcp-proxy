@@ -29,7 +29,7 @@ jobs:
       - run: cargo test --locked --all-targets
       - name: Test the container with the official MCP SDK
         run: |
-          docker build -t oauth-to-key-mcp-proxy:local .
+          docker build -t oauth-to-bearer-mcp-proxy:local .
           python3 -m venv /tmp/mcp-sdk
           /tmp/mcp-sdk/bin/pip install --quiet 'mcp==2.3.0'
           /tmp/mcp-sdk/bin/python scripts/sdk-smoke.py

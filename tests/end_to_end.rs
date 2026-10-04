@@ -13,7 +13,7 @@ use axum::{
     routing::any,
 };
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
-use oauth_to_key_mcp_proxy::{
+use oauth_to_bearer_mcp_proxy::{
     config::{Config, Limits},
     router, serve,
 };

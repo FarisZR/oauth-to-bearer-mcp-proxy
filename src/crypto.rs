@@ -50,7 +50,7 @@ impl Sealer {
     }
 
     fn context(&self, purpose: &str) -> String {
-        format!("oauth-to-key-mcp-proxy:v1:{purpose}:{}", self.binding)
+        format!("oauth-to-bearer-mcp-proxy:v1:{purpose}:{}", self.binding)
     }
 
     pub fn seal<T: Serialize>(&self, purpose: &str, value: &T) -> Result<String> {

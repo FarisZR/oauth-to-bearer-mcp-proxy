@@ -4,7 +4,7 @@
 # ///
 """Exercise a release container with the official OAuth-enabled MCP SDK on Linux.
 
-Run after docker build -t oauth-to-key-mcp-proxy:local .:
+Run after docker build -t oauth-to-bearer-mcp-proxy:local .:
     uv run scripts/sdk-smoke.py
 Only disposable configuration, containers, and volumes are created.
 """
@@ -184,7 +184,7 @@ async def main(image: str, prefix: str) -> None:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--image", default="oauth-to-key-mcp-proxy:local")
+    parser.add_argument("--image", default="oauth-to-bearer-mcp-proxy:local")
     parser.add_argument("--prefix", default="", help="Public URL path, e.g. /services/one")
     args = parser.parse_args()
     if args.prefix and not re.fullmatch(r"(?:/[A-Za-z0-9._~-]+)+", args.prefix):

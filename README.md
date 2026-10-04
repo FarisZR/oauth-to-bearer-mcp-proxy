@@ -1,4 +1,4 @@
-# oauth-to-key-mcp-proxy
+# oauth-to-bearer-mcp-proxy
 
 A small Rust proxy that gives a bearer-authenticated MCP server an OAuth interface. Use it when your agent client supports OAuth but has no way to enter a plain API token.
 
@@ -93,7 +93,7 @@ Use `handle` to keep the path intact. Each instance has its own OAuth issuer, ca
 
 ## Updates and local builds
 
-GitHub Actions runs formatting, Clippy, tests, and Docker builds on pushes and pull requests. Successful pushes publish AMD64 and ARM64 images to `ghcr.io/fariszr/oauth-to-key-mcp-proxy`. `latest` follows `main`; branch, commit SHA, and `v*` tag images are also published.
+GitHub Actions runs formatting, Clippy, tests, and Docker builds on pushes and pull requests. Successful pushes publish AMD64 and ARM64 images to `ghcr.io/fariszr/oauth-to-bearer-mcp-proxy`. `latest` follows `main`; branch, commit SHA, and `v*` tag images are also published.
 
 ```sh
 docker compose pull
@@ -103,7 +103,7 @@ docker compose up -d
 To build your own image:
 
 ```sh
-docker build -t oauth-to-key-mcp-proxy .
+docker build -t oauth-to-bearer-mcp-proxy .
 ```
 
 To run without Docker, install Rust 1.91 or newer, choose a writable `token_key_file` such as `data/token.key`, and run:

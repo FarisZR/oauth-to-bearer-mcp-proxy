@@ -1,6 +1,6 @@
 # Configuration and deployment
 
-Configuration is a TOML file. Run `oauth-to-key-mcp-proxy --config /path/to/config.toml`; without arguments it reads `config.toml` in the current directory. Restart the process after changing the file. Unknown options are rejected so spelling mistakes cannot silently alter behavior.
+Configuration is a TOML file. Run `oauth-to-bearer-mcp-proxy --config /path/to/config.toml`; without arguments it reads `config.toml` in the current directory. Restart the process after changing the file. Unknown options are rejected so spelling mistakes cannot silently alter behavior.
 
 | Option | Default | Meaning |
 | --- | --- | --- |
@@ -80,6 +80,7 @@ Run one process/container per configured endpoint. Authorization codes live in m
 ## Credentials and restarts
 
 The proxy keeps no API-token database. Access tokens contain encrypted API keys, which the proxy decrypts only to authenticate upstream requests. Dynamic client registrations are also encrypted into opaque client IDs. Both remain valid after a restart when the same key file and endpoint URLs are retained. Browser forms carry encrypted, expiring tickets and survive a restart; their callbacks are rechecked against the current configuration when submitted. Unexchanged authorization codes must be retried after a restart.
+
 
 Access tokens have the same lifetime as the upstream API key. There is no independent expiry or refresh grant; the token response omits `expires_in`. An upstream `401` triggers the proxy's OAuth discovery challenge so the client can reconnect with a replacement key. Revoke an individual connection by revoking its upstream key. Deleting or rotating `token_key_file` disconnects **all** connections and invalidates dynamic registrations.
 

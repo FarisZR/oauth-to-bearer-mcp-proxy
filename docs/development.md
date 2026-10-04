@@ -7,15 +7,15 @@ cargo fmt --all -- --check
 cargo clippy --locked --all-targets -- -D warnings
 cargo test --locked --all-targets
 cargo build --release --locked
-docker build -t oauth-to-key-mcp-proxy .
+docker build -t oauth-to-bearer-mcp-proxy .
 ```
 
 To verify ordinary client interoperability on Linux, build the release image and run the official Python MCP SDK smoke test with [uv](https://docs.astral.sh/uv/):
 
 ```sh
-docker build -t oauth-to-key-mcp-proxy:local .
-uv run scripts/sdk-smoke.py
-uv run scripts/sdk-smoke.py --prefix /services/one
+docker build -t oauth-to-bearer-mcp-proxy:local .
+uv run scripts/sdk-smoke.py --image oauth-to-bearer-mcp-proxy:local
+uv run scripts/sdk-smoke.py --image oauth-to-bearer-mcp-proxy:local --prefix /services/one
 ```
 
 The script starts a real bearer-only MCP server, links an unmodified SDK OAuth client, lists and calls a tool, restarts the proxy, and checks both key-entry modes. Run it at the origin and with a nested prefix to check standard client discovery for both deployments. It creates and cleans up its own temporary container, configuration, and data volume. Python and the SDK are development dependencies only.
@@ -26,7 +26,7 @@ Source layout:
 
 | File | Responsibility |
 | --- | --- |
-| `src/main.rs` | Configuration path, listener, shutdown signals. |
+| `src/main.rs` | Configuration path, listener, shutdown signals, command identity. |
 | `src/config.rs` | TOML schema and startup validation. |
 | `src/crypto.rs` | Persistent key creation and authenticated token envelopes. |
 | `src/oauth.rs` | Metadata, registration, consent, codes, PKCE, token exchange. |

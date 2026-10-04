@@ -685,7 +685,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "oauth-to-key-mcp-proxy"
+name = "oauth-to-bearer-mcp-proxy"
 version = "0.1.0"
 dependencies = [
  "anyhow",

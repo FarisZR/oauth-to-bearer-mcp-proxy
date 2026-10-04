@@ -1,11 +1,11 @@
 [package]
-name = "oauth-to-key-mcp-proxy"
+name = "oauth-to-bearer-mcp-proxy"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.91"
 description = "A minimal OAuth facade for bearer-authenticated HTTP MCP servers"
 license = "MIT"
-repository = "https://github.com/FarisZR/oauth-to-key-mcp-proxy"
+repository = "https://github.com/FarisZR/oauth-to-bearer-mcp-proxy"
 
 [dependencies]
 anyhow = "1"

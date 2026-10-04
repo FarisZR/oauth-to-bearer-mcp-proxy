@@ -1,6 +1,6 @@
 services:
   proxy:
-    image: ghcr.io/fariszr/oauth-to-key-mcp-proxy:latest
+    image: ghcr.io/fariszr/oauth-to-bearer-mcp-proxy:latest
     restart: unless-stopped
     ports:
       - "127.0.0.1:8080:8080"
