@@ -60,7 +60,7 @@ class Storage:
         self.client_info = client_info
 
 
-async def main(image: str) -> None:
+async def main(image: str, prefix: str) -> None:
     upstream = MCPServer("Real upstream", log_level="ERROR")
 
     @upstream.tool()
@@ -87,7 +87,8 @@ async def main(image: str) -> None:
     upstream_server = uvicorn.Server(uvicorn.Config(bearer_only, log_level="error"))
     upstream_task = asyncio.create_task(upstream_server.serve(sockets=[listener]))
     proxy_listener = free_socket()
-    public_url = f"http://127.0.0.1:{proxy_listener.getsockname()[1]}"
+    origin = f"http://127.0.0.1:{proxy_listener.getsockname()[1]}"
+    public_url = f"{origin}{prefix}"
     proxy_listener.close()
     resource = f"{public_url}/mcp"
     name = f"oauth-proxy-smoke-{uuid.uuid4().hex[:12]}"
@@ -102,13 +103,14 @@ async def main(image: str) -> None:
         async with httpx2.AsyncClient(follow_redirects=False) as browser:
             page = await browser.get(url)
             page.raise_for_status()
+            assert f'action="{prefix}/oauth/authorize"' in page.text
             match = re.search(r'name=ticket value="([^"]+)"', page.text)
             assert match, "Authorization page did not contain a consent ticket"
             form = {"ticket": match[1], "action": "allow"}
             if "name=api_token" in page.text:
                 form["api_token"] = API_KEY
             response = await browser.post(f"{public_url}/oauth/authorize", data=form,
-                                          headers={"Origin": public_url})
+                                          headers={"Origin": origin})
             assert response.status_code == 303, response.text
             parameters = parse_qs(urlparse(response.headers["location"]).query)
             callback = AuthorizationCodeResult(code=parameters["code"][0],
@@ -169,7 +171,7 @@ async def main(image: str) -> None:
             await connect(manual, "client_secret_post")
             assert browser_visits == 2
             assert seen_keys and all(key == f"Bearer {API_KEY}".encode() for key in seen_keys)
-            print("Official MCP SDK: discovery, DCR, OAuth, tools/list, tools/call, restart, and manual API-key secret passed.")
+            print(f"Official MCP SDK at {prefix or '/'}: discovery, DCR, OAuth, tools/list, tools/call, restart, and manual API-key secret passed.")
     except BaseException:
         subprocess.run(["docker", "logs", name], check=False)
         raise
@@ -183,4 +185,8 @@ async def main(image: str) -> None:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--image", default="oauth-to-key-mcp-proxy:local")
-    asyncio.run(main(parser.parse_args().image))
+    parser.add_argument("--prefix", default="", help="Public URL path, e.g. /services/one")
+    args = parser.parse_args()
+    if args.prefix and not re.fullmatch(r"(?:/[A-Za-z0-9._~-]+)+", args.prefix):
+        parser.error("--prefix must be a path with nonempty URL-safe segments")
+    asyncio.run(main(args.image, args.prefix))

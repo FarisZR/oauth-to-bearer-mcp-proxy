@@ -1,5 +1,6 @@
-# The HTTPS origin that clients will reach. The MCP URL is public_url + /mcp.
-public_url = "https://mcp.example.com"
+# The HTTPS base URL clients reach, including this instance's path.
+# The MCP URL is public_url + /mcp. An origin without a path also works.
+public_url = "https://mcp.example.com/one"
 
 # The existing server's exact Streamable HTTP MCP endpoint.
 upstream_url = "https://upstream.example.com/mcp"

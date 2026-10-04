@@ -4,7 +4,7 @@ Configuration is a TOML file. Run `oauth-to-key-mcp-proxy --config /path/to/conf
 
 | Option | Default | Meaning |
 | --- | --- | --- |
-| `public_url` | Required | Client-facing HTTPS origin, without a path, query, credentials, or fragment. HTTP is allowed for loopback development. |
+| `public_url` | Required | Client-facing HTTPS base URL, optionally including a path. No query, credentials, or fragment. HTTP is allowed for loopback development. |
 | `upstream_url` | Required | Exact HTTP or HTTPS Streamable HTTP endpoint. Its path and configured query are retained. URL credentials and fragments are rejected. |
 | `bind` | `"0.0.0.0:8080"` | Socket address on which the process listens. |
 | `token_key_file` | `"data/token.key"` | Persistent, automatically generated 32-byte encryption key. The container example uses `/data/token.key`. |
@@ -17,7 +17,7 @@ Configuration is a TOML file. Run `oauth-to-key-mcp-proxy --config /path/to/conf
 For example:
 
 ```toml
-public_url = "https://mcp.example.com"
+public_url = "https://mcp.example.com/services/one"
 upstream_url = "http://internal-mcp:9000/api/mcp?workspace=example"
 bind = "0.0.0.0:8080"
 token_key_file = "/data/token.key"
@@ -40,7 +40,22 @@ The image runs as UID/GID `65532`, includes TLS trust roots, and has no shell or
 
 The example Compose file binds port 8080 to loopback for a host reverse proxy. To reach a separate MCP container, attach both containers to the same Docker network and use its service name in `upstream_url`. Inside the proxy container, `localhost` refers to the proxy itself.
 
-Expose the whole public origin through HTTPS. Path-prefix hosting is intentionally unsupported. Do not buffer SSE responses or apply a short idle timeout to them. `/healthz` returns `200` and `ok` when the process is running; it does not send requests to the upstream or verify an API token.
+Expose the configured base URL through HTTPS, preserving its path. Do not buffer SSE responses or apply a short idle timeout to them. `<base>/healthz` returns `200` and `ok` when the process is running; it does not send requests to the upstream or verify an API token.
+
+### Shared-domain routing
+
+For `public_url = "https://mcp.example.com/services/one"`, route these paths to this instance:
+
+| Path | Purpose |
+| --- | --- |
+| `/services/one/*` | MCP, OAuth endpoints, health check, and issuer-relative discovery aliases. |
+| `/.well-known/oauth-protected-resource/services/one/mcp` | RFC 9728 protected-resource discovery, advertised in the `401` challenge. |
+| `/.well-known/oauth-authorization-server/services/one` | RFC 8414 authorization-server discovery. |
+| `/.well-known/openid-configuration/services/one` | Additional discovery compatibility. |
+
+These discovery URLs insert `/.well-known/` before the base path; forwarding only `/services/one/*` is insufficient. See the [Caddy example](../README.md#several-instances-on-one-domain). Preserve the full incoming path rather than stripping the prefix. Use separate Compose projects or service names, published ports, configuration files, and data volumes for each instance.
+
+Paths may contain letters, digits, `/`, `-`, `.`, `_`, and `~`, up to 512 bytes, with no empty segments. A trailing slash is normalized away. Each prefix has a distinct issuer and resource, and neither claims origin-wide discovery routes. An origin-only base URL still uses `/mcp` and `/oauth/*`. `allowed_origins` contains origins such as `https://my-agent.example.com`, never base paths.
 
 Run one process/container per configured endpoint. In-progress browser forms and authorization codes live in memory, so multiple replicas behind a load balancer require sticky routing; this utility is intended for one lightweight instance per MCP.
 
@@ -56,7 +71,7 @@ Treat the encryption key and OAuth tokens as credentials. Back up the data volum
 
 | Symptom | Check |
 | --- | --- |
-| Client cannot discover OAuth | Route `/.well-known/*`, `/oauth/*`, and `/mcp` to the same instance; verify `public_url`. |
+| Client cannot discover OAuth | Route the base path and its path-specific discovery URLs to the same instance; verify `public_url` and preserve paths. |
 | `redirect_uri is not registered` | Copy the exact callback URL, including path, query, and any loopback port. |
 | `S256 PKCE is required` | Use a client supporting the OAuth authorization-code flow with S256 PKCE. |
 | Authorization form expired | Restart the linking flow; forms last ten minutes and codes last two minutes. |

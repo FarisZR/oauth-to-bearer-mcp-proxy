@@ -41,6 +41,48 @@ pub fn router(config: Config) -> Result<Router> {
         .iter()
         .map(|origin| origin.parse::<HeaderValue>())
         .collect::<Result<Vec<_>, _>>()?;
+    let mut routes = Router::new()
+        .route(&config.endpoint_path("/healthz"), get(|| async { "ok\n" }))
+        .route(
+            &config.endpoint_path("/.well-known/oauth-protected-resource"),
+            get(oauth::resource_metadata),
+        )
+        .route(
+            &config.resource_metadata_path(),
+            get(oauth::resource_metadata),
+        )
+        .route(&config.server_metadata_path(), get(oauth::server_metadata))
+        .route(
+            &config.endpoint_path("/.well-known/openid-configuration"),
+            get(oauth::server_metadata),
+        )
+        .route(
+            &config.endpoint_path("/oauth/register"),
+            post(oauth::register),
+        )
+        .route(
+            &config.endpoint_path("/oauth/authorize"),
+            get(oauth::authorize).post(oauth::consent),
+        )
+        .route(&config.endpoint_path("/oauth/token"), post(oauth::token))
+        .route(&config.endpoint_path("/mcp"), any(proxy::forward));
+    if !config.prefix().is_empty() {
+        // Also support clients using issuer-relative discovery. The canonical
+        // RFC 8414 / RFC 9728 URLs above insert .well-known before the path.
+        routes = routes
+            .route(
+                &config.endpoint_path("/.well-known/oauth-authorization-server"),
+                get(oauth::server_metadata),
+            )
+            .route(
+                &config.endpoint_path("/.well-known/oauth-protected-resource/mcp"),
+                get(oauth::resource_metadata),
+            )
+            .route(
+                &format!("/.well-known/openid-configuration{}", config.prefix()),
+                get(oauth::server_metadata),
+            );
+    }
     let state = Arc::new(App {
         config,
         sealer,
@@ -51,31 +93,7 @@ pub fn router(config: Config) -> Result<Router> {
         pending: Mutex::new(HashMap::new()),
         codes: Mutex::new(HashMap::new()),
     });
-    Ok(Router::new()
-        .route("/healthz", get(|| async { "ok\n" }))
-        .route(
-            "/.well-known/oauth-protected-resource",
-            get(oauth::resource_metadata),
-        )
-        .route(
-            "/.well-known/oauth-protected-resource/mcp",
-            get(oauth::resource_metadata),
-        )
-        .route(
-            "/.well-known/oauth-authorization-server",
-            get(oauth::server_metadata),
-        )
-        .route(
-            "/.well-known/openid-configuration",
-            get(oauth::server_metadata),
-        )
-        .route("/oauth/register", post(oauth::register))
-        .route(
-            "/oauth/authorize",
-            get(oauth::authorize).post(oauth::consent),
-        )
-        .route("/oauth/token", post(oauth::token))
-        .route("/mcp", any(proxy::forward))
+    Ok(routes
         .layer(DefaultBodyLimit::max(32 * 1024))
         .layer(
             CorsLayer::new()

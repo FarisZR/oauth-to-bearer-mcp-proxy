@@ -13,7 +13,7 @@ cp config.example.toml config.toml
 Edit the two URLs and the server name:
 
 ```toml
-public_url = "https://mcp.example.com"
+public_url = "https://mcp.example.com/one"
 upstream_url = "https://your-existing-mcp.example.com/mcp"
 token_key_file = "/data/token.key"
 name = "My MCP server"
@@ -23,7 +23,7 @@ Then start it:
 
 ```sh
 docker compose up -d
-curl http://127.0.0.1:8080/healthz
+curl http://127.0.0.1:8080/one/healthz
 ```
 
 Put an HTTPS reverse proxy in front of port 8080. For example, a Caddy instance running on the same host can use:
@@ -34,13 +34,13 @@ mcp.example.com {
 }
 ```
 
-Route the whole hostname to the proxy, including `/.well-known/` and `/oauth/`. Set `public_url` to that exact HTTPS origin. Preserve streaming responses in your reverse proxy. On SELinux hosts, add `Z` to the config bind mount (`:ro,Z`).
+Set `public_url` to the exact HTTPS base URL clients reach, including its path. The MCP endpoint is that URL plus `/mcp`. Preserve paths and streaming responses in your reverse proxy. On SELinux hosts, add `Z` to the config bind mount (`:ro,Z`).
 
 The `proxy-data` volume holds an automatically generated encryption key. Keep this volume when updating or replacing the container so linked clients stay connected. API tokens do not go in the configuration file.
 
 ## Connect your agent client
 
-Add `https://mcp.example.com/mcp` as the MCP server and select **OAuth**.
+Add `https://mcp.example.com/one/mcp` as the MCP server and select **OAuth**.
 
 **Clients that register automatically:** leave the OAuth client ID and secret unset. When the authorization page opens, paste your upstream API token and click **Connect**.
 
@@ -56,16 +56,38 @@ Use these values in the client:
 
 | Field | Value |
 | --- | --- |
-| MCP URL | `https://mcp.example.com/mcp` |
+| MCP URL | `https://mcp.example.com/one/mcp` |
 | OAuth client ID | `mcp-proxy` |
 | OAuth client secret | Your upstream API token, without `Bearer ` |
-| Authorization URL, if requested | `https://mcp.example.com/oauth/authorize` |
-| Token URL, if requested | `https://mcp.example.com/oauth/token` |
+| Authorization URL, if requested | `https://mcp.example.com/one/oauth/authorize` |
+| Token URL, if requested | `https://mcp.example.com/one/oauth/token` |
 | Token endpoint authentication | `client_secret_post` or `client_secret_basic` |
 
 Finish the normal OAuth linking flow. The client receives an opaque access token and needs no proxy-specific behavior. The upstream server decides what your API token can access and when it expires. Each connection can use a different API token.
 
 The upstream must support **Streamable HTTP MCP** with `Authorization: Bearer <API token>`. This utility adds authentication compatibility; it does not translate stdio or legacy HTTP+SSE transports. Browser-based clients may need their origin added to `allowed_origins`; see [configuration](docs/configuration.md).
+
+## Several instances on one domain
+
+Give each instance its own base path, upstream, data volume, and host port. For example, `public_url = "https://mcp.example.com/one"` on port 8081 and `public_url = "https://mcp.example.com/two"` on port 8082 produce the client URLs `/one/mcp` and `/two/mcp`.
+
+OAuth discovery also uses standard path-specific `/.well-known/` URLs. Route those alongside each base path. With Caddy:
+
+```caddyfile
+mcp.example.com {
+    @one path /one/* /.well-known/oauth-authorization-server/one /.well-known/oauth-protected-resource/one/mcp /.well-known/openid-configuration/one
+    handle @one {
+        reverse_proxy 127.0.0.1:8081
+    }
+
+    @two path /two/* /.well-known/oauth-authorization-server/two /.well-known/oauth-protected-resource/two/mcp /.well-known/openid-configuration/two
+    handle @two {
+        reverse_proxy 127.0.0.1:8082
+    }
+}
+```
+
+Use `handle` to keep the path intact. Each instance has its own OAuth issuer, callbacks, and tokens. Nested paths such as `/services/one` work too. An origin without a path remains supported.
 
 ## Updates and local builds
 

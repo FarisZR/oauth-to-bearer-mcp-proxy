@@ -31,6 +31,10 @@ For a dynamically registered client, confidential-client secrets are random, ord
 
 ## OAuth surface
 
+The table shows paths for an origin-only `public_url`. With a base path, all application endpoints move under that path. For `/services/one`, MCP is `/services/one/mcp` and authorization is `/services/one/oauth/authorize`. Form actions and browser cookie paths include the prefix; Origin validation and CORS use the URL's origin without its path.
+
+Canonical discovery follows RFC 8414 and RFC 9728: insert the well-known segment between the origin and the issuer/resource path. This gives `/.well-known/oauth-authorization-server/services/one` and `/.well-known/oauth-protected-resource/services/one/mcp`. The `401` challenge advertises the latter, and metadata advertises the exact issuer and resource. Issuer-relative discovery aliases also work. Prefixed instances expose no origin-wide discovery route, so multiple instances can share a hostname. Tokens and registrations are bound to the resource URL, including its prefix.
+
 | Endpoint | Behavior |
 | --- | --- |
 | `GET /.well-known/oauth-protected-resource[/mcp]` | Resource metadata advertising this `/mcp` endpoint and its authorization server. |

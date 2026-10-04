@@ -33,6 +33,7 @@ jobs:
           python3 -m venv /tmp/mcp-sdk
           /tmp/mcp-sdk/bin/pip install --quiet 'mcp==2.3.0'
           /tmp/mcp-sdk/bin/python scripts/sdk-smoke.py
+          /tmp/mcp-sdk/bin/python scripts/sdk-smoke.py --prefix /services/one
 
   image:
     needs: check

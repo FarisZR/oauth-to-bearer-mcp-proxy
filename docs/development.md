@@ -15,11 +15,12 @@ To verify ordinary client interoperability on Linux, build the release image and
 ```sh
 docker build -t oauth-to-key-mcp-proxy:local .
 uv run scripts/sdk-smoke.py
+uv run scripts/sdk-smoke.py --prefix /services/one
 ```
 
-The script starts a real bearer-only MCP server, links an unmodified SDK OAuth client, lists and calls a tool, restarts the proxy, and checks both key-entry modes. It creates and cleans up its own temporary container, configuration, and data volume. Python and the SDK are development dependencies only.
+The script starts a real bearer-only MCP server, links an unmodified SDK OAuth client, lists and calls a tool, restarts the proxy, and checks both key-entry modes. Run it at the origin and with a nested prefix to check standard client discovery for both deployments. It creates and cleans up its own temporary container, configuration, and data volume. Python and the SDK are development dependencies only.
 
-`tests/end_to_end.rs` starts real HTTP listeners for the proxy and a recording upstream. Tests cover discovery, all three dynamically registered authentication methods, API keys supplied through pre-registered OAuth secrets, PKCE and callback/resource/client binding, browser CSRF, code replay, token tampering, restart continuity, and configuration validation. Forwarding tests check exact request/response bytes, large request bodies, header filtering, GET/POST/DELETE, queries, sessions, status codes, and an SSE response that stays open beyond the header timeout.
+`tests/end_to_end.rs` starts real HTTP listeners for the proxy and a recording upstream. Tests cover discovery, all three dynamically registered authentication methods, API keys supplied through pre-registered OAuth secrets, PKCE and callback/resource/client binding, browser CSRF, code replay, token tampering, restart continuity, and configuration validation. Two instances share one HTTP listener to check path-specific discovery, form/cookie paths, CORS, and isolation of tokens and registrations even with a shared encryption key. Forwarding tests check exact request/response bytes, large request bodies, header filtering, GET/POST/DELETE, queries, sessions, status codes, and an SSE response that stays open beyond the header timeout.
 
 Source layout:
 

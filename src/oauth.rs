@@ -330,8 +330,9 @@ pub(crate) async fn authorize(
     } else {
         "<p>Enter your API token to connect this client.</p><label for=api_token>API token</label><input id=api_token name=api_token type=password autocomplete=off required maxlength=4096>".to_owned()
     };
+    let authorize_path = app.config.endpoint_path("/oauth/authorize");
     let html = format!(
-        "<!doctype html><html lang=en><meta charset=utf-8><meta name=viewport content=\"width=device-width,initial-scale=1\"><title>Connect to {name}</title><style>body{{font:16px system-ui;background:#f5f5f5;color:#202020;margin:0;padding:2rem}}main{{max-width:28rem;margin:8vh auto;background:white;padding:2rem;border-radius:12px}}h1{{font-size:1.5rem}}label,input{{display:block;width:100%;box-sizing:border-box}}input{{padding:.75rem;margin:.5rem 0 1rem;border:1px solid #888;border-radius:6px}}button{{padding:.7rem 1rem;margin-right:.5rem;cursor:pointer}}</style><main><h1>Connect to {name}</h1><p>Allow <strong>{client}</strong> to use this MCP server with your API token.</p><form action=/oauth/authorize method=post><input type=hidden name=ticket value=\"{ticket}\">{key_field}<button type=submit name=action value=allow>Connect</button><button type=submit name=action value=deny formnovalidate>Cancel</button></form></main></html>",
+        "<!doctype html><html lang=en><meta charset=utf-8><meta name=viewport content=\"width=device-width,initial-scale=1\"><title>Connect to {name}</title><style>body{{font:16px system-ui;background:#f5f5f5;color:#202020;margin:0;padding:2rem}}main{{max-width:28rem;margin:8vh auto;background:white;padding:2rem;border-radius:12px}}h1{{font-size:1.5rem}}label,input{{display:block;width:100%;box-sizing:border-box}}input{{padding:.75rem;margin:.5rem 0 1rem;border:1px solid #888;border-radius:6px}}button{{padding:.7rem 1rem;margin-right:.5rem;cursor:pointer}}</style><main><h1>Connect to {name}</h1><p>Allow <strong>{client}</strong> to use this MCP server with your API token.</p><form action=\"{authorize_path}\" method=post><input type=hidden name=ticket value=\"{ticket}\">{key_field}<button type=submit name=action value=allow>Connect</button><button type=submit name=action value=deny formnovalidate>Cancel</button></form></main></html>",
         name = escape(&app.config.name),
         client = escape(&client.name),
     );
@@ -358,8 +359,9 @@ fn escape(value: &str) -> String {
 
 fn cookie(app: &App, ticket: &str, clear: bool) -> String {
     format!(
-        "mcp_oauth_{ticket}={}; Path=/oauth/authorize; Max-Age={}; HttpOnly; SameSite=Lax{}",
+        "mcp_oauth_{ticket}={}; Path={}; Max-Age={}; HttpOnly; SameSite=Lax{}",
         if clear { "" } else { ticket },
+        app.config.endpoint_path("/oauth/authorize"),
         if clear { 0 } else { PENDING_TTL.as_secs() },
         if app.config.public_url.scheme() == "https" {
             "; Secure"
@@ -394,7 +396,7 @@ pub(crate) async fn consent(
     if !has_cookie(&headers, &form.ticket)
         || headers
             .get(header::ORIGIN)
-            .is_some_and(|v| v.to_str().ok() != Some(app.config.issuer().as_str()))
+            .is_some_and(|v| v.to_str().ok() != Some(app.config.origin().as_str()))
     {
         return Err(OAuthError::invalid(
             "Authorization form must be submitted from the same browser",

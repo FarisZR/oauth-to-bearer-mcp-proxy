@@ -7,7 +7,7 @@ use url::Url;
 #[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
-    /// Public origin; the client-facing MCP endpoint is always /mcp.
+    /// Public base URL; the client-facing MCP endpoint is <base>/mcp.
     pub public_url: Url,
     /// Exact upstream Streamable HTTP endpoint, including any query string.
     pub upstream_url: Url,
@@ -62,10 +62,19 @@ impl Config {
     pub fn validate(&self) -> Result<()> {
         validate_http_url(&self.public_url)?;
         ensure!(
-            self.public_url.path() == "/"
-                && self.public_url.query().is_none()
-                && self.public_url.fragment().is_none(),
-            "public_url must be an origin without a path, query, or fragment"
+            self.public_url.query().is_none() && self.public_url.fragment().is_none(),
+            "public_url cannot have a query or fragment"
+        );
+        ensure!(
+            self.public_url.path().len() <= 512
+                && self
+                    .public_url
+                    .path()
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric()
+                        || matches!(b, b'/' | b'-' | b'.' | b'_' | b'~'))
+                && !self.public_url.path().contains("//"),
+            "public_url path must use letters, digits, /, -, ., _, or ~ without empty segments"
         );
         ensure!(
             self.public_url.scheme() == "https" || is_loopback(&self.public_url),
@@ -120,8 +129,32 @@ impl Config {
         Ok(())
     }
 
-    pub fn issuer(&self) -> String {
+    pub fn origin(&self) -> String {
         self.public_url.origin().ascii_serialization()
+    }
+
+    pub fn prefix(&self) -> &str {
+        self.public_url.path().trim_end_matches('/')
+    }
+
+    pub fn issuer(&self) -> String {
+        format!("{}{}", self.origin(), self.prefix())
+    }
+
+    pub fn endpoint_path(&self, suffix: &str) -> String {
+        format!("{}{suffix}", self.prefix())
+    }
+
+    pub fn resource_metadata_path(&self) -> String {
+        format!("/.well-known/oauth-protected-resource{}/mcp", self.prefix())
+    }
+
+    pub fn server_metadata_path(&self) -> String {
+        format!("/.well-known/oauth-authorization-server{}", self.prefix())
+    }
+
+    pub fn resource_metadata_url(&self) -> String {
+        format!("{}{}", self.origin(), self.resource_metadata_path())
     }
 
     pub fn resource(&self) -> String {
@@ -130,7 +163,7 @@ impl Config {
 
     pub fn origins(&self) -> Vec<String> {
         let mut origins = self.allowed_origins.clone();
-        origins.push(self.issuer());
+        origins.push(self.origin());
         origins
     }
 }

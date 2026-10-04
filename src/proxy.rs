@@ -23,8 +23,8 @@ fn unauthorized(app: &App, invalid: bool) -> Response {
 
 fn challenge(app: &App, headers: &mut HeaderMap, invalid: bool) {
     let value = format!(
-        "Bearer resource_metadata=\"{}/.well-known/oauth-protected-resource/mcp\"{}",
-        app.config.issuer(),
+        "Bearer resource_metadata=\"{}\"{}",
+        app.config.resource_metadata_url(),
         if invalid {
             ", error=\"invalid_token\""
         } else {

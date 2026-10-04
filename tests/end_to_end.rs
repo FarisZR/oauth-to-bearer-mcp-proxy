@@ -149,6 +149,10 @@ struct Harness {
 
 impl Harness {
     async fn new(manual: bool) -> Self {
+        Self::new_at_prefix(manual, "").await
+    }
+
+    async fn new_at_prefix(manual: bool, prefix: &str) -> Self {
         let captures = Arc::new(Mutex::new(Vec::new()));
         let upstream = Server::start(
             Router::new()
@@ -158,11 +162,13 @@ impl Harness {
         .await;
         let data = tempfile::tempdir().unwrap();
         let mut config: Config = toml::from_str(&format!("public_url = 'https://proxy.example'\nupstream_url = '{}/actual?configured=yes'\ntoken_key_file = '{}'\nupstream_header_timeout_seconds = 1\nallowed_origins = ['https://browser.example']\n", upstream.url, data.path().join("token.key").display())).unwrap();
+        config.public_url = Url::parse(&format!("https://proxy.example{prefix}")).unwrap();
         if manual {
             config.oauth.client_id = Some("configured-client".into());
             config.oauth.redirect_uris = vec![CALLBACK.into()];
         }
-        let server = Server::start(router(config.clone()).unwrap()).await;
+        let mut server = Server::start(router(config.clone()).unwrap()).await;
+        server.url.push_str(config.prefix());
         let http = Client::builder()
             .redirect(reqwest::redirect::Policy::none())
             .build()
@@ -204,6 +210,15 @@ impl Harness {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
+        assert!(
+            response.headers()["set-cookie"]
+                .to_str()
+                .unwrap()
+                .contains(&format!(
+                    "Path={};",
+                    self.config.endpoint_path("/oauth/authorize")
+                ))
+        );
         let cookie = response.headers()["set-cookie"]
             .to_str()
             .unwrap()
@@ -215,6 +230,10 @@ impl Harness {
         let html = response.text().await.unwrap();
         assert!(!html.contains("<client>"));
         assert!(!html.contains(KEY));
+        assert!(html.contains(&format!(
+            "action=\"{}\"",
+            self.config.endpoint_path("/oauth/authorize")
+        )));
         (ticket, cookie)
     }
 
@@ -227,7 +246,7 @@ impl Harness {
             .http
             .post(format!("{}/oauth/authorize", self.server.url))
             .header("cookie", cookie)
-            .header("origin", self.config.issuer())
+            .header("origin", self.config.origin())
             .form(&form)
             .send()
             .await
@@ -694,7 +713,11 @@ fn configuration_rejects_unsafe_urls_and_unknown_options() {
     for public in [
         "http://public.example",
         "https://user:password@proxy.example",
-        "https://proxy.example/prefix",
+        "https://proxy.example/prefix?query=1",
+        "https://proxy.example/prefix#fragment",
+        "https://proxy.example/a//b",
+        "https://proxy.example/{route}",
+        "https://proxy.example/space%20here",
     ] {
         let config: Config = toml::from_str(&format!(
             "public_url = '{public}'\nupstream_url = 'https://upstream.example/mcp'\n"
@@ -708,4 +731,172 @@ fn configuration_rejects_unsafe_urls_and_unknown_options() {
     )
     .unwrap();
     assert!(config.validate().is_ok());
+    for public in [
+        "https://proxy.example/services/one",
+        "https://proxy.example/services/one/",
+    ] {
+        let config: Config = toml::from_str(&format!(
+            "public_url = '{public}'\nupstream_url = 'https://upstream.example/mcp'\n"
+        ))
+        .unwrap();
+        assert!(config.validate().is_ok());
+        assert_eq!(config.issuer(), "https://proxy.example/services/one");
+        assert_eq!(config.origins(), ["https://proxy.example"]);
+    }
+}
+
+#[tokio::test]
+async fn two_path_instances_share_one_origin_with_isolated_discovery_and_tokens() {
+    let mut a = Harness::new_at_prefix(false, "/services/alpha/").await;
+    let mut b = Harness::new_at_prefix(false, "/services/beta").await;
+    // A shared key still cannot make tokens or registrations cross instances.
+    b.config.token_key_file = a.config.token_key_file.clone();
+    let shared = Server::start(
+        router(a.config.clone())
+            .unwrap()
+            .merge(router(b.config.clone()).unwrap()),
+    )
+    .await;
+    a.server.url = format!("{}{}", shared.url, a.config.prefix());
+    b.server.url = format!("{}{}", shared.url, b.config.prefix());
+    for h in [&a, &b] {
+        let response = h
+            .http
+            .get(format!("{}/mcp", h.server.url))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            response.headers()["www-authenticate"],
+            format!(
+                "Bearer resource_metadata=\"{}\"",
+                h.config.resource_metadata_url()
+            )
+        );
+        for path in [
+            h.config.resource_metadata_path(),
+            h.config
+                .endpoint_path("/.well-known/oauth-protected-resource"),
+            h.config
+                .endpoint_path("/.well-known/oauth-protected-resource/mcp"),
+        ] {
+            let response = h
+                .http
+                .get(format!("{}{path}", shared.url))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let metadata: Value = response.json().await.unwrap();
+            assert_eq!(metadata["resource"], h.config.resource());
+            assert_eq!(
+                metadata["authorization_servers"],
+                json!([h.config.issuer()])
+            );
+        }
+        for path in [
+            h.config.server_metadata_path(),
+            h.config
+                .endpoint_path("/.well-known/oauth-authorization-server"),
+            h.config.endpoint_path("/.well-known/openid-configuration"),
+            format!("/.well-known/openid-configuration{}", h.config.prefix()),
+        ] {
+            let metadata: Value = h
+                .http
+                .get(format!("{}{path}", shared.url))
+                .send()
+                .await
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
+            assert_eq!(metadata["issuer"], h.config.issuer());
+            assert_eq!(
+                metadata["authorization_endpoint"],
+                format!("{}/oauth/authorize", h.config.issuer())
+            );
+            assert_eq!(
+                metadata["token_endpoint"],
+                format!("{}/oauth/token", h.config.issuer())
+            );
+            assert_eq!(
+                metadata["registration_endpoint"],
+                format!("{}/oauth/register", h.config.issuer())
+            );
+        }
+        let health = h
+            .http
+            .get(format!("{}/healthz", h.server.url))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(health.status(), StatusCode::OK);
+        let access = h.access_token("client_secret_post").await;
+        let response = h
+            .http
+            .post(format!("{}/mcp", h.server.url))
+            .bearer_auth(&access)
+            .header("origin", h.config.origin())
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers()["access-control-allow-origin"],
+            h.config.origin()
+        );
+        let other = if std::ptr::eq(h, &a) { &b } else { &a };
+        let response = h
+            .http
+            .post(format!("{}/mcp", other.server.url))
+            .bearer_auth(&access)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+    let registration = a.register("none").await;
+    let response = b
+        .http
+        .get(format!("{}/oauth/authorize", b.server.url))
+        .query(&[
+            ("response_type", "code"),
+            ("client_id", registration["client_id"].as_str().unwrap()),
+            ("redirect_uri", CALLBACK),
+            (
+                "code_challenge",
+                URL_SAFE_NO_PAD
+                    .encode(Sha256::digest(VERIFIER.as_bytes()))
+                    .as_str(),
+            ),
+            ("code_challenge_method", "S256"),
+        ])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        response.json::<Value>().await.unwrap()["error"],
+        "invalid_client"
+    );
+    for path in [
+        "/mcp",
+        "/oauth/authorize",
+        "/healthz",
+        "/.well-known/oauth-authorization-server",
+        "/.well-known/oauth-protected-resource/mcp",
+    ] {
+        assert_eq!(
+            a.http
+                .get(format!("{}{path}", shared.url))
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::NOT_FOUND
+        );
+    }
+    assert_eq!(a.captures.lock().unwrap().len(), 1);
+    assert_eq!(b.captures.lock().unwrap().len(), 1);
 }
