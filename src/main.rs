@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use anyhow::{Result, bail};
 use oauth_to_key_mcp_proxy::{config::Config, router};
 
-#[tokio::main]
+#[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
     let mut args = std::env::args().skip(1);
     let path = match args.next().as_deref() {

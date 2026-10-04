@@ -32,6 +32,6 @@ Source layout:
 | `src/proxy.rs` | Authentication translation and streaming HTTP forwarding. |
 | `src/lib.rs` | Application state, route wiring, body limits, CORS. |
 
-There is no MCP SDK dependency: the proxy does not interpret protocol messages. The Docker image uses a Debian builder and a nonroot distroless runtime with CA certificates. BuildKit caches dependency downloads and compiled artifacts by architecture.
+There is no MCP SDK dependency: the proxy does not interpret protocol messages. The binary uses one asynchronous event loop to keep each instance small. The Docker image uses a Debian builder and a nonroot distroless runtime with CA certificates. BuildKit caches dependency downloads and compiled artifacts by architecture.
 
 The GitHub workflow validates every push and pull request, including the SDK smoke test, then builds AMD64/ARM64 containers on native runners. Successful push/manual runs publish architecture images and combine them into one multi-platform manifest. Registry login and image publication use the repository's `GITHUB_TOKEN` with `packages: write`; no registry secret is required. Action references are pinned to commit SHAs. Successful default-branch pushes publish `latest`; other pushes also get branch/tag and full commit-SHA tags. Pull requests build images without publishing.

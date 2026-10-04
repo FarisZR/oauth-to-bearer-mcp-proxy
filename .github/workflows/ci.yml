@@ -61,7 +61,9 @@ jobs:
         id: meta
         with:
           images: ghcr.io/${{ github.repository }}
-          flavor: suffix=-${{ matrix.arch }},onlatest=true
+          flavor: |
+            latest=false
+            suffix=-${{ matrix.arch }},onlatest=true
           tags: |
             type=ref,event=branch
             type=ref,event=pr
@@ -97,6 +99,7 @@ jobs:
         id: meta
         with:
           images: ghcr.io/${{ github.repository }}
+          flavor: latest=false
           tags: |
             type=ref,event=branch
             type=ref,event=tag
