@@ -1080,32 +1080,39 @@ async fn unexchanged_code_flood_is_limited_and_recovers_promptly() {
     let (ticket, cookie) = h.authorize(id).await;
     let saved_code = h.consent(&ticket, &cookie, Some(KEY)).await;
     let attacker = h.register("none").await;
-    let (ticket, cookie) = h.authorize(attacker["client_id"].as_str().unwrap()).await;
+    let attacker_id = attacker["client_id"].as_str().unwrap();
+    let (mut ticket, mut cookie) = h.authorize(attacker_id).await;
     let mut limited = 0;
-    for _ in 0..1024 {
-        let response = h
-            .http
-            .post(format!("{}/oauth/authorize", h.server.url))
-            .header("cookie", &cookie)
-            .header("origin", h.config.origin())
-            .form(&[
-                ("ticket", ticket.as_str()),
-                ("action", "allow"),
-                ("api_token", "syntactically-valid-invalid-key"),
-            ])
-            .send()
-            .await
-            .unwrap();
-        match response.status() {
-            StatusCode::SEE_OTHER => {
-                issued += 1;
+    // Original attack: distinct forms. Alternate attack: replay one valid form.
+    for fresh_form in [true, false] {
+        for _ in 0..1024 {
+            if fresh_form {
+                (ticket, cookie) = h.authorize(attacker_id).await;
             }
-            StatusCode::TOO_MANY_REQUESTS => {
-                limited += 1;
-                assert_eq!(response.headers()["retry-after"], "1");
-                assert_eq!(response.headers()["cache-control"], "no-store");
+            let response = h
+                .http
+                .post(format!("{}/oauth/authorize", h.server.url))
+                .header("cookie", &cookie)
+                .header("origin", h.config.origin())
+                .form(&[
+                    ("ticket", ticket.as_str()),
+                    ("action", "allow"),
+                    ("api_token", "syntactically-valid-invalid-key"),
+                ])
+                .send()
+                .await
+                .unwrap();
+            match response.status() {
+                StatusCode::SEE_OTHER => {
+                    issued += 1;
+                }
+                StatusCode::TOO_MANY_REQUESTS => {
+                    limited += 1;
+                    assert_eq!(response.headers()["retry-after"], "1");
+                    assert_eq!(response.headers()["cache-control"], "no-store");
+                }
+                status => panic!("Unexpected flood response {status}"),
             }
-            status => panic!("Unexpected flood response {status}"),
         }
     }
     assert!(limited > 0);
