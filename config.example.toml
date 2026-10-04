@@ -1,0 +1,18 @@
+# The HTTPS origin that clients will reach. The MCP URL is public_url + /mcp.
+public_url = "https://mcp.example.com"
+
+# The existing server's exact Streamable HTTP MCP endpoint.
+upstream_url = "https://upstream.example.com/mcp"
+
+# Keep this file across container replacements; it is generated automatically.
+token_key_file = "/data/token.key"
+
+# Optional label on the authorization page.
+name = "My MCP server"
+
+# Optional: clients with manually entered OAuth credentials.
+# Copy the client's exact callback URL into this allowlist. No wildcards.
+# The OAuth client secret entered in the client is the upstream API token.
+# [oauth]
+# client_id = "mcp-proxy"
+# redirect_uris = ["https://your-client.example/oauth/callback"]

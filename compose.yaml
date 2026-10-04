@@ -1,0 +1,17 @@
+services:
+  proxy:
+    image: ghcr.io/fariszr/oauth-to-key-mcp-proxy:latest
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8080:8080"
+    volumes:
+      - ./config.toml:/etc/mcp-proxy/config.toml:ro
+      - proxy-data:/data
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+
+volumes:
+  proxy-data:
