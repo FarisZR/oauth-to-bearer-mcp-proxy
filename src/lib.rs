@@ -2,9 +2,9 @@ pub mod config;
 mod crypto;
 mod oauth;
 mod proxy;
+mod server;
 
 use std::{
-    collections::HashMap,
     sync::{Arc, Mutex},
     time::Duration,
 };
@@ -14,19 +14,22 @@ use axum::{
     Router,
     extract::DefaultBodyLimit,
     http::{HeaderValue, Method},
+    middleware,
     routing::{any, get, post},
 };
 use tower_http::cors::{AllowHeaders, CorsLayer};
 
 use config::Config;
 use crypto::Sealer;
+pub use server::serve;
+use tokio::sync::Semaphore;
 
 struct App {
     config: Config,
     sealer: Sealer,
     http: reqwest::Client,
-    pending: Mutex<HashMap<String, oauth::Pending>>,
-    codes: Mutex<HashMap<String, oauth::Code>>,
+    codes: Mutex<oauth::Codes>,
+    requests: Arc<Semaphore>,
 }
 
 /// Build one proxy for one upstream. No MCP SDK or message parsing is needed.
@@ -84,17 +87,20 @@ pub fn router(config: Config) -> Result<Router> {
             );
     }
     let state = Arc::new(App {
+        requests: Arc::new(Semaphore::new(config.limits.max_requests)),
         config,
         sealer,
         http: reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
             .connect_timeout(Duration::from_secs(10))
             .build()?,
-        pending: Mutex::new(HashMap::new()),
-        codes: Mutex::new(HashMap::new()),
+        codes: Mutex::new(oauth::Codes::new()),
     });
     Ok(routes
-        .layer(DefaultBodyLimit::max(32 * 1024))
+        // Stateless consent tickets include escaped OAuth state and client
+        // metadata. All extraction is still bounded in bytes and time.
+        .layer(DefaultBodyLimit::max(64 * 1024))
+        .layer(middleware::from_fn_with_state(state.clone(), server::admit))
         .layer(
             CorsLayer::new()
                 .allow_origin(origins)

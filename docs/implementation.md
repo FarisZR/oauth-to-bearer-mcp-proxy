@@ -49,7 +49,11 @@ Canonical discovery follows RFC 8414 and RFC 9728: insert the well-known segment
 
 Resource indicators must match the configured public `/mcp` URL when supplied. Omitting `resource` is accepted for older clients. Callbacks match registered URI strings exactly. Authorization responses preserve `state`, include `iss`, and retain unrelated registered callback query parameters.
 
-S256 PKCE is required for all clients. Codes are random, single-use, bound to client ID, redirect URI, and challenge, and expire after 120 seconds. Browser forms expire after 600 seconds and require an HttpOnly, SameSite cookie. Consent cannot be submitted from another Origin. Each in-memory collection is bounded at 1,024 entries and expired entries are pruned on use. Successful code consumption is atomic under a mutex.
+S256 PKCE is required for all clients. Codes are random, single-use, bound to client ID, redirect URI, and challenge, and expire after 120 seconds. Successful code consumption is atomic under a mutex.
+
+Browser forms carry an authenticated, encrypted `consent` ticket containing the validated request, a browser nonce, and a 600-second expiry. Opening a page allocates no shared pending state. Submission requires the nonce's HttpOnly, SameSite cookie and the same Origin; the callback is checked against the current client allowlist again. Expired, tampered, cross-instance, and wrong-purpose tickets are rejected. A form can be retried until expiry; issued codes remain single-use.
+
+Code storage has a 1,024-entry defensive cap and expired entries are pruned on use. A token bucket inside the same mutex permits a burst of 32 codes and replenishes two per second across all client IDs and both key-entry modes. At most 32 + 2 × 120 = 272 codes can be issued in a code lifetime, so storage exhaustion cannot be reached by accumulating unexchanged codes. A compile-time assertion maintains this invariant. Rejected issuance returns `429` with a one-second retry hint, without invalidating the consent form; exchanges and established MCP sessions do not consume issuance credit.
 
 OAuth responses carrying credentials or authorization state use `Cache-Control: no-store`. The authorization page escapes displayed values, has no JavaScript or external assets, and applies a restrictive CSP. API keys never appear in authorization URLs, callback URLs, configuration, or application logs.
 
@@ -59,7 +63,7 @@ This is a deliberately small OAuth subset: authorization codes, pre-registration
 
 `crypto.rs` uses XChaCha20-Poly1305 authenticated encryption with an OS-generated 256-bit key and a fresh 192-bit nonce per object. The binary key file is created once with Unix mode `0600`; existing malformed keys cause startup to fail rather than silently invalidating clients.
 
-Opaque tokens encode `nonce || ciphertext || authentication tag` as unpadded base64url. Associated data separates the `access` and `client` purposes and binds the public resource URL and exact upstream URL. An access token cannot be used as a client registration or on a different proxy configuration, even if the encryption key is reused.
+Opaque tokens encode `nonce || ciphertext || authentication tag` as unpadded base64url. Associated data separates the `access`, `client`, and `consent` purposes and binds the public resource URL and exact upstream URL. An access token cannot be used as a client registration or on a different proxy configuration, even if the encryption key is reused.
 
 Dynamic registrations encrypt callback metadata, the display name, the selected authentication method, and any generated client secret into the `dcr_` client ID. No registration table, disk updates, database, or external service is needed. Access tokens encrypt only the API key; they have no proxy-specific expiry. The key's upstream expiry and revocation still apply.
 
@@ -71,7 +75,11 @@ Transport header changes are limited to the bridge: regenerate Host for the upst
 
 Reqwest follows no redirects, so the API key cannot be sent to a redirect destination. An upstream redirect is returned as received; configure its final MCP URL to avoid redirecting clients outside the proxy. Redirects, errors, and response bodies may contain upstream information; this utility makes authentication transparent to the client protocol, not a mechanism for concealing an upstream's own content.
 
-The request/header deadline defaults to 300 seconds; response streams have no total deadline. TLS validation remains enabled. Network failures produce a generic `502`, and the header deadline produces `504`; underlying errors are not logged with potentially sensitive URLs. The binary handles SIGINT and SIGTERM for graceful shutdown.
+The upstream request/header deadline defaults to 300 seconds; response streams have no total deadline. TLS validation remains enabled. Network failures produce a generic `502`, and the upstream header deadline produces `504`; underlying errors are not logged with potentially sensitive URLs. The binary handles SIGINT and SIGTERM for graceful shutdown.
+
+`server.rs` admits at most 64 inbound sockets before spawning connection tasks and immediately closes excess sockets. It reaps completed tasks even under continuous accepts. Hyper's HTTP/1 parser has a 10-second header deadline and a 32 KiB buffer limit. The HTTPS reverse proxy can expose HTTP/2 to clients while speaking HTTP/1 to this process, as with the original Axum server.
+
+Request admission uses a 32-permit semaphore and rejects overload with `503` and `Retry-After: 1`. A body wrapper owns each permit until the response ends, errors, or is dropped, so SSE remains counted after headers are sent and disconnects release capacity. OAuth POST handlers have a 10-second deadline covering JSON/Form extraction and a 64 KiB body limit. Incomplete fixed-length or chunked bodies receive `408` and close. The byte limit accommodates serialized consent tickets at the existing state/key size limits; MCP bodies remain streamed. These defaults are configurable through `[limits]`. No inbound timeout imposes a total MCP stream lifetime.
 
 ## References
 

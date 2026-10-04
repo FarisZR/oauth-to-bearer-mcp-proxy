@@ -32,6 +32,9 @@ Source layout:
 | `src/oauth.rs` | Metadata, registration, consent, codes, PKCE, token exchange. |
 | `src/proxy.rs` | Authentication translation and streaming HTTP forwarding. |
 | `src/lib.rs` | Application state, route wiring, body limits, CORS. |
+| `src/server.rs` | Connection admission, header/body deadlines, request permits held through response completion. |
+
+Security regression tests flood 1,024 abandoned forms and unexchanged codes, check prompt issuance recovery and existing-code exchange, cover changed callback allowlists after restart and maximum escaped state/key sizes, send incomplete fixed-length and chunked bodies to each OAuth POST endpoint, exhaust the socket cap, and check request permits through SSE completion and disconnect. They use the same server entry point as the binary. Long streams remain open past the configured inbound deadlines.
 
 There is no MCP SDK dependency: the proxy does not interpret protocol messages. The binary uses one asynchronous event loop to keep each instance small. The Docker image uses a Debian builder and a nonroot distroless runtime with CA certificates. BuildKit caches dependency downloads and compiled artifacts by architecture.
 

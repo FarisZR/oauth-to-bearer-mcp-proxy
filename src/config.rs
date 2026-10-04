@@ -23,6 +23,28 @@ pub struct Config {
     pub upstream_header_timeout_seconds: u64,
     #[serde(default)]
     pub oauth: OAuthConfig,
+    #[serde(default)]
+    pub limits: Limits,
+}
+
+#[derive(Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Limits {
+    pub max_connections: usize,
+    pub max_requests: usize,
+    pub header_timeout_seconds: u64,
+    pub oauth_body_timeout_seconds: u64,
+}
+
+impl Default for Limits {
+    fn default() -> Self {
+        Self {
+            max_connections: 64,
+            max_requests: 32,
+            header_timeout_seconds: 10,
+            oauth_body_timeout_seconds: 10,
+        }
+    }
 }
 
 #[derive(Clone, Default, Deserialize)]
@@ -96,6 +118,16 @@ impl Config {
         ensure!(
             self.upstream_header_timeout_seconds > 0,
             "upstream timeout must be positive"
+        );
+        ensure!(
+            (1..=4096).contains(&self.limits.max_connections)
+                && (1..=4096).contains(&self.limits.max_requests),
+            "connection and request limits must be between 1 and 4096"
+        );
+        ensure!(
+            (1..=300).contains(&self.limits.header_timeout_seconds)
+                && (1..=300).contains(&self.limits.oauth_body_timeout_seconds),
+            "inbound timeouts must be between 1 and 300 seconds"
         );
         ensure!(
             self.allowed_origins.len() <= 32,

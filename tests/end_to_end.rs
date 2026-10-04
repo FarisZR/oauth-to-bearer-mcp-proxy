@@ -13,11 +13,16 @@ use axum::{
     routing::any,
 };
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
-use oauth_to_key_mcp_proxy::{config::Config, router};
+use oauth_to_key_mcp_proxy::{
+    config::{Config, Limits},
+    router, serve,
+};
 use reqwest::Client;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpStream;
 use tokio::task::JoinHandle;
 use url::Url;
 
@@ -32,9 +37,17 @@ struct Server {
 
 impl Server {
     async fn start(app: Router) -> Self {
+        Self::start_with_limits(app, Limits::default()).await
+    }
+
+    async fn start_with_limits(app: Router, limits: Limits) -> Self {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
-        let task = tokio::spawn(async { axum::serve(listener, app).await.unwrap() });
+        let task = tokio::spawn(async {
+            serve(listener, app, limits, std::future::pending())
+                .await
+                .unwrap()
+        });
         Self { url, task }
     }
 }
@@ -153,6 +166,10 @@ impl Harness {
     }
 
     async fn new_at_prefix(manual: bool, prefix: &str) -> Self {
+        Self::new_with_limits(manual, prefix, Limits::default()).await
+    }
+
+    async fn new_with_limits(manual: bool, prefix: &str, limits: Limits) -> Self {
         let captures = Arc::new(Mutex::new(Vec::new()));
         let upstream = Server::start(
             Router::new()
@@ -163,11 +180,13 @@ impl Harness {
         let data = tempfile::tempdir().unwrap();
         let mut config: Config = toml::from_str(&format!("public_url = 'https://proxy.example'\nupstream_url = '{}/actual?configured=yes'\ntoken_key_file = '{}'\nupstream_header_timeout_seconds = 1\nallowed_origins = ['https://browser.example']\n", upstream.url, data.path().join("token.key").display())).unwrap();
         config.public_url = Url::parse(&format!("https://proxy.example{prefix}")).unwrap();
+        config.limits = limits;
         if manual {
             config.oauth.client_id = Some("configured-client".into());
             config.oauth.redirect_uris = vec![CALLBACK.into()];
         }
-        let mut server = Server::start(router(config.clone()).unwrap()).await;
+        let mut server =
+            Server::start_with_limits(router(config.clone()).unwrap(), config.limits.clone()).await;
         server.url.push_str(config.prefix());
         let http = Client::builder()
             .redirect(reqwest::redirect::Policy::none())
@@ -226,8 +245,15 @@ impl Harness {
             .next()
             .unwrap()
             .to_owned();
-        let ticket = cookie.split_once('=').unwrap().1.to_owned();
         let html = response.text().await.unwrap();
+        let ticket = html
+            .split("name=ticket value=\"")
+            .nth(1)
+            .unwrap()
+            .split('"')
+            .next()
+            .unwrap()
+            .to_owned();
         assert!(!html.contains("<client>"));
         assert!(!html.contains(KEY));
         assert!(html.contains(&format!(
@@ -899,4 +925,404 @@ async fn two_path_instances_share_one_origin_with_isolated_discovery_and_tokens(
     }
     assert_eq!(a.captures.lock().unwrap().len(), 1);
     assert_eq!(b.captures.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn abandoned_authorization_forms_do_not_starve_other_clients() {
+    let h = Harness::new_at_prefix(false, "/one").await;
+    let legitimate = h.register("none").await;
+    let id = legitimate["client_id"].as_str().unwrap();
+    let (ticket, cookie) = h.authorize(id).await;
+    let attacker = h.register("none").await;
+    for _ in 0..1024 {
+        h.authorize(attacker["client_id"].as_str().unwrap()).await;
+    }
+    // The form opened before the flood and a fresh form both remain usable.
+    let code = h.consent(&ticket, &cookie, Some(KEY)).await;
+    h.authorize(id).await;
+    let response = h
+        .http
+        .post(format!("{}/oauth/token", h.server.url))
+        .form(&h.token_form(id, &code))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    // Neither another browser cookie nor another sealed purpose is a form ticket.
+    for (bad_ticket, bad_cookie) in [
+        (ticket.as_str(), "mcp_oauth_other=other"),
+        (id.strip_prefix("dcr_").unwrap(), cookie.as_str()),
+    ] {
+        let response = h
+            .http
+            .post(format!("{}/oauth/authorize", h.server.url))
+            .header("cookie", bad_cookie)
+            .header("origin", h.config.origin())
+            .form(&[
+                ("ticket", bad_ticket),
+                ("action", "allow"),
+                ("api_token", KEY),
+            ])
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert!(!response.headers().contains_key("location"));
+    }
+}
+
+#[tokio::test]
+async fn stateless_forms_obey_callback_changes_after_restart() {
+    let mut h = Harness::new_at_prefix(true, "/one").await;
+    let (ticket, cookie) = h.authorize("configured-client").await;
+    h.config.oauth.redirect_uris = vec!["https://replacement.example/callback".into()];
+    h.server = Server::start(router(h.config.clone()).unwrap()).await;
+    h.server.url.push_str(h.config.prefix());
+    let response = h
+        .http
+        .post(format!("{}/oauth/authorize", h.server.url))
+        .header("cookie", cookie)
+        .header("origin", h.config.origin())
+        .form(&[("ticket", ticket.as_str()), ("action", "allow")])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert!(!response.headers().contains_key("location"));
+}
+
+#[tokio::test]
+async fn stateless_forms_preserve_maximum_escaped_state_and_api_keys() {
+    let h = Harness::new(false).await;
+    let redirects: Vec<_> = (0..5)
+        .map(|i| format!("https://client.example/{i}/{}", "a".repeat(480)))
+        .collect();
+    let registration: Value = h.http.post(format!("{}/oauth/register", h.server.url))
+        .json(&json!({"redirect_uris": redirects, "client_name": "\0".repeat(200), "token_endpoint_auth_method": "none"}))
+        .send().await.unwrap().json().await.unwrap();
+    let id = registration["client_id"].as_str().unwrap();
+    let challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(VERIFIER.as_bytes()));
+    let state = "\0".repeat(2048);
+    let response = h
+        .http
+        .get(format!("{}/oauth/authorize", h.server.url))
+        .query(&[
+            ("response_type", "code"),
+            ("client_id", id),
+            ("redirect_uri", redirects[0].as_str()),
+            ("code_challenge", challenge.as_str()),
+            ("code_challenge_method", "S256"),
+            ("state", state.as_str()),
+        ])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let cookie = response.headers()["set-cookie"]
+        .to_str()
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap()
+        .to_owned();
+    let html = response.text().await.unwrap();
+    let ticket = html
+        .split("name=ticket value=\"")
+        .nth(1)
+        .unwrap()
+        .split('"')
+        .next()
+        .unwrap();
+    assert!(ticket.len() > 16_384);
+    let key = "&".repeat(4096);
+    let response = h
+        .http
+        .post(format!("{}/oauth/authorize", h.server.url))
+        .header("cookie", cookie)
+        .header("origin", h.config.origin())
+        .form(&[
+            ("ticket", ticket),
+            ("action", "allow"),
+            ("api_token", key.as_str()),
+        ])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    let callback = Url::parse(response.headers()["location"].to_str().unwrap()).unwrap();
+    let pairs: std::collections::HashMap<_, _> = callback.query_pairs().into_owned().collect();
+    assert_eq!(pairs["state"], state);
+    let mut form = h.token_form(id, &pairs["code"]);
+    form.iter_mut()
+        .find(|(name, _)| name == "redirect_uri")
+        .unwrap()
+        .1 = redirects[0].clone();
+    assert_eq!(
+        h.http
+            .post(format!("{}/oauth/token", h.server.url))
+            .form(&form)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+}
+
+#[tokio::test]
+async fn unexchanged_code_flood_is_limited_and_recovers_promptly() {
+    let h = Harness::new_at_prefix(true, "/one").await;
+    let started = std::time::Instant::now();
+    let mut issued = 1;
+    let legitimate = h.register("none").await;
+    let id = legitimate["client_id"].as_str().unwrap();
+    let (ticket, cookie) = h.authorize(id).await;
+    let saved_code = h.consent(&ticket, &cookie, Some(KEY)).await;
+    let attacker = h.register("none").await;
+    let (ticket, cookie) = h.authorize(attacker["client_id"].as_str().unwrap()).await;
+    let mut limited = 0;
+    for _ in 0..1024 {
+        let response = h
+            .http
+            .post(format!("{}/oauth/authorize", h.server.url))
+            .header("cookie", &cookie)
+            .header("origin", h.config.origin())
+            .form(&[
+                ("ticket", ticket.as_str()),
+                ("action", "allow"),
+                ("api_token", "syntactically-valid-invalid-key"),
+            ])
+            .send()
+            .await
+            .unwrap();
+        match response.status() {
+            StatusCode::SEE_OTHER => {
+                issued += 1;
+            }
+            StatusCode::TOO_MANY_REQUESTS => {
+                limited += 1;
+                assert_eq!(response.headers()["retry-after"], "1");
+                assert_eq!(response.headers()["cache-control"], "no-store");
+            }
+            status => panic!("Unexpected flood response {status}"),
+        }
+    }
+    assert!(limited > 0);
+    // Already issued codes are neither evicted nor rate limited at exchange.
+    let response = h
+        .http
+        .post(format!("{}/oauth/token", h.server.url))
+        .form(&h.token_form(id, &saved_code))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let access = response.json::<Value>().await.unwrap()["access_token"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_eq!(
+        h.http
+            .get(format!("{}/mcp", h.server.url))
+            .bearer_auth(access)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+
+    // Newly registered identities cannot reset the issuance budget.
+    for _ in 0..16 {
+        let sybil = h.register("none").await;
+        let (sybil_ticket, sybil_cookie) = h.authorize(sybil["client_id"].as_str().unwrap()).await;
+        let response = h
+            .http
+            .post(format!("{}/oauth/authorize", h.server.url))
+            .header("cookie", sybil_cookie)
+            .header("origin", h.config.origin())
+            .form(&[
+                ("ticket", sybil_ticket.as_str()),
+                ("action", "allow"),
+                ("api_token", KEY),
+            ])
+            .send()
+            .await
+            .unwrap();
+        match response.status() {
+            StatusCode::SEE_OTHER => {
+                issued += 1;
+            }
+            StatusCode::TOO_MANY_REQUESTS => {}
+            status => panic!("Unexpected new-client response {status}"),
+        }
+    }
+    // Include elapsed replenishment so this remains valid on slow CI runners.
+    assert!(issued <= 32 + (started.elapsed().as_secs_f64() * 2.0).ceil() as usize);
+    // Recovery takes one retry interval, rather than waiting for the 120s TTL.
+    let (ticket, cookie) = h.authorize("configured-client").await;
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    let code = h.consent(&ticket, &cookie, None).await;
+    let mut form = h.token_form("configured-client", &code);
+    form.push(("client_secret".into(), KEY.into()));
+    let response = h
+        .http
+        .post(format!("{}/oauth/token", h.server.url))
+        .form(&form)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+}
+
+async fn raw_response(mut stream: TcpStream) -> String {
+    let mut bytes = Vec::new();
+    tokio::time::timeout(Duration::from_secs(3), stream.read_to_end(&mut bytes))
+        .await
+        .expect("socket was retained past its deadline")
+        .unwrap();
+    String::from_utf8_lossy(&bytes).into_owned()
+}
+
+#[tokio::test]
+async fn slow_oauth_bodies_expire_for_every_endpoint_and_body_encoding() {
+    let h = Harness::new_with_limits(
+        false,
+        "/services/one",
+        Limits {
+            oauth_body_timeout_seconds: 1,
+            ..Limits::default()
+        },
+    )
+    .await;
+    let address = Url::parse(&h.server.url)
+        .unwrap()
+        .socket_addrs(|| None)
+        .unwrap()[0];
+    let mut streams = Vec::new();
+    for endpoint in ["register", "authorize", "token"] {
+        for framing in ["Content-Length: 100", "Transfer-Encoding: chunked"] {
+            let mut stream = TcpStream::connect(address).await.unwrap();
+            let content_type = if endpoint == "register" {
+                "application/json"
+            } else {
+                "application/x-www-form-urlencoded"
+            };
+            let partial = if framing.starts_with("Content-Length") {
+                "x"
+            } else {
+                "64\r\nx"
+            };
+            stream.write_all(format!("POST /services/one/oauth/{endpoint} HTTP/1.1\r\nHost: proxy.example\r\nContent-Type: {content_type}\r\n{framing}\r\nConnection: close\r\n\r\n{partial}").as_bytes()).await.unwrap();
+            streams.push(stream);
+        }
+    }
+    for stream in streams {
+        assert!(raw_response(stream).await.starts_with("HTTP/1.1 408"));
+    }
+    assert_eq!(
+        h.http
+            .get(format!("{}/healthz", h.server.url))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+    h.access_token("none").await;
+}
+
+#[tokio::test]
+async fn socket_cap_rejects_excess_connections_and_slow_headers_expire() {
+    let limits = Limits {
+        max_connections: 2,
+        header_timeout_seconds: 1,
+        ..Limits::default()
+    };
+    let h = Harness::new_with_limits(false, "", limits).await;
+    let address = Url::parse(&h.server.url)
+        .unwrap()
+        .socket_addrs(|| None)
+        .unwrap()[0];
+    let idle = TcpStream::connect(address).await.unwrap();
+    let mut partial = TcpStream::connect(address).await.unwrap();
+    partial
+        .write_all(b"GET /healthz HTTP/1.1\r\nHost:")
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let excess = TcpStream::connect(address).await.unwrap();
+    assert!(raw_response(excess).await.is_empty());
+    // Header deadlines may close the socket silently instead of sending 408.
+    let idle_response = raw_response(idle).await;
+    assert!(idle_response.is_empty() || idle_response.starts_with("HTTP/1.1 408"));
+    let partial_response = raw_response(partial).await;
+    assert!(partial_response.is_empty() || partial_response.starts_with("HTTP/1.1 408"));
+    assert_eq!(
+        h.http
+            .get(format!("{}/healthz", h.server.url))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+}
+
+#[tokio::test]
+async fn stream_permits_are_held_until_eof_or_disconnect() {
+    let h = Harness::new_with_limits(
+        false,
+        "",
+        Limits {
+            max_requests: 1,
+            header_timeout_seconds: 1,
+            oauth_body_timeout_seconds: 1,
+            ..Limits::default()
+        },
+    )
+    .await;
+    let access = h.access_token("none").await;
+    for disconnect in [false, true] {
+        let mut stream = h
+            .http
+            .get(format!("{}/mcp", h.server.url))
+            .bearer_auth(&access)
+            .header("x-test-response", "sse")
+            .send()
+            .await
+            .unwrap();
+        assert!(stream.chunk().await.unwrap().is_some());
+        let overloaded = h
+            .http
+            .get(format!("{}/mcp", h.server.url))
+            .bearer_auth(&access)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(overloaded.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(overloaded.headers()["retry-after"], "1");
+        assert_eq!(
+            h.captures.lock().unwrap().len(),
+            if disconnect { 3 } else { 1 }
+        );
+        if !disconnect {
+            // The stream remains alive past both inbound deadlines.
+            assert!(stream.chunk().await.unwrap().is_some());
+            assert!(stream.chunk().await.unwrap().is_none());
+        }
+        drop(stream);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(
+            h.http
+                .get(format!("{}/mcp", h.server.url))
+                .bearer_auth(&access)
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::OK
+        );
+    }
 }

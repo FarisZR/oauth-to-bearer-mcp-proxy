@@ -17,3 +17,10 @@ name = "My MCP server"
 # [oauth]
 # client_id = "mcp-proxy"
 # redirect_uris = ["https://your-client.example/oauth/callback"]
+
+# Optional resource limits; these are already the defaults.
+# [limits]
+# max_connections = 64
+# max_requests = 32
+# header_timeout_seconds = 10
+# oauth_body_timeout_seconds = 10

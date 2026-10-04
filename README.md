@@ -38,6 +38,8 @@ Set `public_url` to the exact HTTPS base URL clients reach, including its path. 
 
 The `proxy-data` volume holds an automatically generated encryption key. Keep this volume when updating or replacing the container so linked clients stay connected. API tokens do not go in the configuration file.
 
+The defaults bound connections, active streams, and OAuth requests. Compose also caps memory, CPU, processes, and file descriptors. See [resource limits](docs/configuration.md) for tuning and retry behavior under load.
+
 ## Connect your agent client
 
 Add `https://mcp.example.com/one/mcp` as the MCP server and select **OAuth**.

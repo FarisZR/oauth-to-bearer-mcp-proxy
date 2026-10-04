@@ -73,7 +73,7 @@ impl Sealer {
     }
 
     pub fn open<T: DeserializeOwned>(&self, purpose: &str, token: &str) -> Option<T> {
-        if token.len() > 16_384 {
+        if token.len() > 64 * 1024 {
             return None;
         }
         let bytes = URL_SAFE_NO_PAD.decode(token).ok()?;

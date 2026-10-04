@@ -1,4 +1,5 @@
 use std::{
+    collections::HashMap,
     sync::Arc,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -23,7 +24,11 @@ use crate::{App, config::validate_redirects, crypto::random_id};
 
 const PENDING_TTL: Duration = Duration::from_secs(600);
 const CODE_TTL: Duration = Duration::from_secs(120);
-const MAX_PENDING: usize = 1024;
+const MAX_CODES: usize = 1024;
+const CODE_BURST: usize = 32;
+const CODES_PER_SECOND: u32 = 2;
+const _: () =
+    assert!(CODE_BURST + CODE_TTL.as_secs() as usize * (CODES_PER_SECOND as usize) < MAX_CODES);
 
 pub(crate) struct OAuthError(StatusCode, &'static str, &'static str);
 
@@ -52,7 +57,15 @@ impl OAuthError {
         Self(
             StatusCode::SERVICE_UNAVAILABLE,
             "temporarily_unavailable",
-            "Too many pending authorizations; try again later",
+            "Authorization is temporarily unavailable; try again later",
+        )
+    }
+
+    fn limited() -> Self {
+        Self(
+            StatusCode::TOO_MANY_REQUESTS,
+            "temporarily_unavailable",
+            "Too many authorizations; retry after one second",
         )
     }
 }
@@ -69,6 +82,11 @@ impl IntoResponse for OAuthError {
                 header::WWW_AUTHENTICATE,
                 "Basic realm=\"oauth/token\"".parse().unwrap(),
             );
+        }
+        if self.0 == StatusCode::TOO_MANY_REQUESTS {
+            response
+                .headers_mut()
+                .insert(header::RETRY_AFTER, "1".parse().unwrap());
         }
         private(response)
     }
@@ -226,7 +244,7 @@ fn client(app: &App, id: &str) -> Result<Client, OAuthError> {
         .ok_or_else(OAuthError::client)
 }
 
-#[derive(Clone, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub(crate) struct Authorization {
     response_type: String,
     client_id: String,
@@ -238,15 +256,67 @@ pub(crate) struct Authorization {
     scope: Option<String>,
 }
 
-pub(crate) struct Pending {
+#[derive(Serialize, Deserialize)]
+struct Pending {
     request: Authorization,
-    created: Instant,
+    nonce: String,
+    expires: u64,
 }
 
 pub(crate) struct Code {
     request: Authorization,
     api_key: Option<String>,
     created: Instant,
+}
+
+pub(crate) struct Codes {
+    entries: HashMap<String, Code>,
+    credit: f64,
+    updated: Instant,
+}
+
+impl Codes {
+    pub(crate) fn new() -> Self {
+        Self {
+            entries: HashMap::new(),
+            credit: CODE_BURST as f64,
+            updated: Instant::now(),
+        }
+    }
+
+    fn issue(
+        &mut self,
+        request: Authorization,
+        api_key: Option<String>,
+    ) -> Result<String, OAuthError> {
+        let now = Instant::now();
+        self.credit = (self.credit
+            + now.duration_since(self.updated).as_secs_f64() * f64::from(CODES_PER_SECOND))
+        .min(CODE_BURST as f64);
+        self.updated = now;
+        self.entries
+            .retain(|_, entry| now.duration_since(entry.created) < CODE_TTL);
+        // A burst plus all replenishment during CODE_TTL fits well below the
+        // storage cap (32 + 2 * 120 = 272). DCR identities cannot evade this
+        // instance-wide budget. A burst cannot reserve every slot for 120s.
+        if self.credit < 1.0 {
+            return Err(OAuthError::limited());
+        }
+        if self.entries.len() >= MAX_CODES {
+            return Err(OAuthError::busy());
+        }
+        self.credit -= 1.0;
+        let code = random_id();
+        self.entries.insert(
+            code.clone(),
+            Code {
+                request,
+                api_key,
+                created: now,
+            },
+        );
+        Ok(code)
+    }
 }
 
 fn resource(app: &App, value: Option<&str>) -> Result<(), OAuthError> {
@@ -307,24 +377,28 @@ pub(crate) async fn authorize(
     if let Err(error) = authorization_parameters(&app, &request) {
         return Ok(callback(&app, &request, None, Some(error.1)));
     }
-    let ticket = random_id();
-    let mut pending = app.pending.lock().unwrap();
-    pending.retain(|_, entry| entry.created.elapsed() < PENDING_TTL);
-    if pending.len() >= MAX_PENDING {
-        return Err(OAuthError::busy());
-    }
     let callback_origin = Url::parse(&request.redirect_uri)
         .unwrap()
         .origin()
         .ascii_serialization();
-    pending.insert(
-        ticket.clone(),
-        Pending {
-            request,
-            created: Instant::now(),
-        },
-    );
-    drop(pending);
+    let nonce = random_id();
+    // Merely opening a form reserves no shared state. The authenticated ticket
+    // carries the validated parameters; the short cookie still binds the browser.
+    let ticket = app
+        .sealer
+        .seal(
+            "consent",
+            &Pending {
+                request,
+                nonce: nonce.clone(),
+                expires: SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs()
+                    + PENDING_TTL.as_secs(),
+            },
+        )
+        .map_err(|_| OAuthError::busy())?;
     let key_field = if client.method == "api_key" {
         "<p>Your client will supply the API token through its OAuth client secret.</p>".to_owned()
     } else {
@@ -343,7 +417,7 @@ pub(crate) async fn authorize(
         format!("default-src 'none'; style-src 'unsafe-inline'; form-action 'self' {callback_origin}; base-uri 'none'; frame-ancestors 'none'").parse().unwrap());
     response.headers_mut().insert(
         header::SET_COOKIE,
-        cookie(&app, &ticket, false).parse().unwrap(),
+        cookie(&app, &nonce, false).parse().unwrap(),
     );
     Ok(response)
 }
@@ -393,7 +467,19 @@ pub(crate) async fn consent(
     headers: HeaderMap,
     Form(form): Form<Consent>,
 ) -> Result<Response, OAuthError> {
-    if !has_cookie(&headers, &form.ticket)
+    let entry: Pending = app.sealer.open("consent", &form.ticket).ok_or_else(|| {
+        OAuthError::invalid("Authorization form is invalid or expired; reconnect your client")
+    })?;
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    if entry.expires <= now || entry.expires > now + PENDING_TTL.as_secs() {
+        return Err(OAuthError::invalid(
+            "Authorization form expired; reconnect your client",
+        ));
+    }
+    if !has_cookie(&headers, &entry.nonce)
         || headers
             .get(header::ORIGIN)
             .is_some_and(|v| v.to_str().ok() != Some(app.config.origin().as_str()))
@@ -405,12 +491,13 @@ pub(crate) async fn consent(
     if !matches!(form.action.as_str(), "allow" | "deny") {
         return Err(OAuthError::invalid("Invalid consent action"));
     }
-    let mut pending = app.pending.lock().unwrap();
-    pending.retain(|_, entry| entry.created.elapsed() < PENDING_TTL);
-    let entry = pending
-        .get(&form.ticket)
-        .ok_or_else(|| OAuthError::invalid("Authorization form expired; reconnect your client"))?;
     let client = client(&app, &entry.request.client_id)?;
+    // Stateless forms survive restarts; a changed callback allowlist still wins.
+    if !client.redirect_uris.contains(&entry.request.redirect_uri) {
+        return Err(OAuthError::invalid(
+            "redirect_uri is not registered for this client",
+        ));
+    }
     let api_key = if form.action == "allow" && client.method != "api_key" {
         let key = form
             .api_token
@@ -424,31 +511,16 @@ pub(crate) async fn consent(
     } else {
         None
     };
-    let entry = pending.remove(&form.ticket).unwrap();
-    drop(pending);
     let mut response = if form.action == "deny" {
         callback(&app, &entry.request, None, Some("access_denied"))
     } else {
-        let code = random_id();
         let mut codes = app.codes.lock().unwrap();
-        codes.retain(|_, entry| entry.created.elapsed() < CODE_TTL);
-        if codes.len() >= MAX_PENDING {
-            return Err(OAuthError::busy());
-        }
-        let response = callback(&app, &entry.request, Some(&code), None);
-        codes.insert(
-            code,
-            Code {
-                request: entry.request,
-                api_key,
-                created: Instant::now(),
-            },
-        );
-        response
+        let code = codes.issue(entry.request.clone(), api_key)?;
+        callback(&app, &entry.request, Some(&code), None)
     };
     response.headers_mut().insert(
         header::SET_COOKIE,
-        cookie(&app, &form.ticket, true).parse().unwrap(),
+        cookie(&app, &entry.nonce, true).parse().unwrap(),
     );
     Ok(response)
 }
@@ -586,8 +658,10 @@ pub(crate) async fn token(
     }
     let challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()));
     let mut codes = app.codes.lock().unwrap();
-    codes.retain(|_, entry| entry.created.elapsed() < CODE_TTL);
-    let entry = codes.get(code).ok_or_else(OAuthError::grant)?;
+    codes
+        .entries
+        .retain(|_, entry| entry.created.elapsed() < CODE_TTL);
+    let entry = codes.entries.get(code).ok_or_else(OAuthError::grant)?;
     if entry.request.client_id != id
         || Some(entry.request.redirect_uri.as_str()) != form.redirect_uri.as_deref()
         || !bool::from(
@@ -603,7 +677,7 @@ pub(crate) async fn token(
         return Err(OAuthError::grant());
     }
     // Consume under one lock so simultaneous exchanges cannot reuse a code.
-    let entry = codes.remove(code).unwrap();
+    let entry = codes.entries.remove(code).unwrap();
     drop(codes);
     let key = manual_key.or(entry.api_key).ok_or_else(OAuthError::grant)?;
     let access_token = app

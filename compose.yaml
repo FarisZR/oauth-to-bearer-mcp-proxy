@@ -8,6 +8,13 @@ services:
       - ./config.toml:/etc/mcp-proxy/config.toml:ro
       - proxy-data:/data
     read_only: true
+    mem_limit: 128m
+    cpus: 0.5
+    pids_limit: 64
+    ulimits:
+      nofile:
+        soft: 1024
+        hard: 1024
     cap_drop:
       - ALL
     security_opt:

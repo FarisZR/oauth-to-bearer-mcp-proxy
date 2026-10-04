@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use anyhow::{Result, bail};
-use oauth_to_key_mcp_proxy::{config::Config, router};
+use oauth_to_key_mcp_proxy::{config::Config, router, serve};
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
@@ -29,15 +29,14 @@ async fn main() -> Result<()> {
     }
     let config = Config::load(&path)?;
     let bind = config.bind;
+    let limits = config.limits.clone();
     let app = router(config)?;
     let listener = tokio::net::TcpListener::bind(bind).await?;
     eprintln!(
         "oauth-to-key-mcp-proxy listening on {}",
         listener.local_addr()?
     );
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown())
-        .await?;
+    serve(listener, app, limits, shutdown()).await?;
     Ok(())
 }
 
